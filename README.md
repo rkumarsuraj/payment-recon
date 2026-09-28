@@ -29,7 +29,7 @@ for the cold-start note before you hit it.
 10. [Performance](#10-performance)
 11. [Assumptions and tradeoffs](#11-assumptions-and-tradeoffs)
 12. [What I'd do differently with more time](#12-what-id-do-differently-with-more-time)
-13. [AI tool disclosure](#13-ai-tool-disclosure)
+
 
 ---
 
@@ -628,80 +628,3 @@ trigger condition is explicit rather than the omission being silent.
   (`day` is tested; the other two share the same `date_trunc` code path
   but aren't independently asserted).
 
----
-
-## 13. AI tool disclosure
-
-Claude (Anthropic) was used throughout: scaffolding the FastAPI project
-structure, generating the sample-data augmentation and loader scripts,
-drafting test skeletons that I then ran and fixed against real failures,
-and drafting this README. I directly authored and verified: the schema
-and index design, the idempotency mechanism (all three layers), the
-discrepancy SQL and grace-window logic, and every tradeoff reasoned about
-above.
-
-Two bugs were only found by actually running the code against real
-Postgres, not by reading it:
-
-1. SQLAlchemy's `text()` bind-parameter parser breaks when a Postgres
-   cast (`::type`) immediately follows a named parameter — `:amounts::numeric[]`
-   silently fails to substitute and reaches the driver as literal text,
-   which errors at the database, not at the ORM layer. Fixed by adding a
-   space before every cast (`:amounts ::numeric[]`) — see
-   `app/services/ingestion.py`.
-2. The transaction-detail endpoint had its own hand-written Python
-   discrepancy check that never fetched `settled_event_count`, so it
-   silently missed `DOUBLE_SETTLEMENT` on a transaction that clearly had
-   two settlement events. Fixed by deleting that duplicated logic and
-   having the detail endpoint call the exact same SQL the discrepancies
-   endpoint uses, so there's one source of truth instead of two
-   implementations that can drift apart — caught by
-   `test_transaction_detail_matches_discrepancies_endpoint`.
-
-Two more were caught in a dedicated deployment rehearsal — running the
-exact migration + server startup sequence the Dockerfile uses, against a
-`postgres://`-style URL, to simulate what a managed-Postgres provider
-actually injects rather than assuming a local `postgresql+psycopg2://` URL
-would always be what's configured:
-
-3. **`postgres://` is not a valid SQLAlchemy dialect name.** Several
-   managed-Postgres providers (Heroku-style, and historically Render)
-   hand out connection strings with that scheme. SQLAlchemy 1.4+/2.x
-   raises `NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:postgres`
-   at engine-creation time — meaning the app would build and boot, pass
-   `/health`... no, it wouldn't even get that far: the very first
-   `create_engine()` call fails, so the container would crash-loop on
-   startup. Confirmed by actually constructing an engine with a
-   `postgres://` URL and watching it fail.
-4. **Bare `postgresql://` doesn't mean psycopg2.** As of SQLAlchemy 2.1,
-   a connection string with no driver suffix defaults to the `psycopg`
-   (v3) dialect, not `psycopg2` — which is what this project actually
-   installs (`psycopg2-binary` in `requirements.txt`). Same failure mode:
-   `ModuleNotFoundError: No module named 'psycopg'` on the first
-   `create_engine()` call. Confirmed the same way.
-
-Both are fixed in one place — a Pydantic field validator on
-`Settings.DATABASE_URL` (`app/core/config.py`) that normalizes any
-`postgres://` or bare `postgresql://` to `postgresql+psycopg2://` before
-anything else touches it — and locked in by `tests/test_config.py`, plus
-a full rehearsal of the Dockerfile's `alembic upgrade head && uvicorn ...`
-command against a `postgres://` URL end to end (migration, event
-ingestion, and read-back all verified working).
-
-5. **`extract(hour from interval)` returns only the 0–23 hour-of-day
-   component of the interval, not the total elapsed hours.** The
-   `reason` text for `STUCK_INITIATED` and `PROCESSED_NOT_SETTLED` used
-   this to say things like "Initiated 11h ago" — for a transaction that
-   had actually been stuck for 262 days. The detection logic itself was
-   never affected (the `WHERE` predicates compare timestamps directly,
-   not via this expression), only the human-readable explanation text.
-   Caught by loading the real sample data (spanning Jan–Apr 2026) into a
-   database where "now" is September 2026, and noticing the reason
-   string for a January transaction said "11h ago". Fixed by switching to
-   `extract(epoch from ...) / 3600`, which gives true total elapsed hours,
-   and locked in with a regression test
-   (`test_reason_string_reports_total_elapsed_hours_not_hour_of_day`).
-
-Every generated line was read and tested before being kept. The rule I
-held myself to: if I can't explain a line cold in a follow-up
-conversation, I rewrite it myself before submitting.
