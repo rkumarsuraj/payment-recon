@@ -1,0 +1,24 @@
+databases:
+  - name: setu-reconciliation-db
+    plan: free
+    databaseName: setu_db
+    user: setu
+
+services:
+  - type: web
+    name: setu-reconciliation-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: setu-reconciliation-db
+          property: connectionString
+      - key: UNSETTLED_AFTER_HOURS
+        value: "48"
+      - key: STUCK_AFTER_HOURS
+        value: "24"
+      - key: LOG_LEVEL
+        value: INFO

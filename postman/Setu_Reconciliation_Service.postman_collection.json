@@ -1,0 +1,340 @@
+{
+  "info": {
+    "name": "Setu Assignment — Partner Reconciliation Service",
+    "description": "Ingest payment lifecycle events, list/inspect transactions, and surface reconciliation summaries and discrepancies. Import the accompanying environment and select it before running.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000", "description": "Defaults to local. Once deployed, change this default to the production URL (e.g. https://setu-reconciliation-api.onrender.com) so a reviewer can run the collection with zero setup, no environment selection required." },
+    { "key": "sample_event_id", "value": "" },
+    { "key": "sample_transaction_id", "value": "1c3196f6-801d-425f-aca9-df47ec7a394a" }
+  ],
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": { "method": "GET", "url": "{{base_url}}/health" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('database ok', () => pm.expect(pm.response.json().database).to.eql('ok'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Ingest Events",
+      "item": [
+        {
+          "name": "POST /events — single event",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/events",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"{{$guid}}\",\n  \"event_type\": \"payment_initiated\",\n  \"transaction_id\": \"{{$guid}}\",\n  \"merchant_id\": \"merchant_1\",\n  \"merchant_name\": \"QuickMart\",\n  \"amount\": 1500.00,\n  \"currency\": \"INR\",\n  \"timestamp\": \"2026-09-28T10:00:00+00:00\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('one inserted', () => pm.expect(pm.response.json().inserted).to.eql(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /events — batch of 3, one malformed (partial success)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/events",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"events\": [\n    {\"event_id\": \"{{$guid}}\", \"event_type\": \"payment_initiated\", \"transaction_id\": \"{{$guid}}\", \"merchant_id\": \"merchant_2\", \"merchant_name\": \"FreshBasket\", \"amount\": 250.00, \"currency\": \"INR\", \"timestamp\": \"2026-09-28T10:05:00+00:00\"},\n    {\"event_id\": \"{{$guid}}\", \"event_type\": \"payment_processed\", \"transaction_id\": \"{{$guid}}\", \"merchant_id\": \"merchant_2\", \"merchant_name\": \"FreshBasket\", \"amount\": 250.00, \"currency\": \"INR\", \"timestamp\": \"2026-09-28T10:06:00+00:00\"},\n    {\"event_id\": \"{{$guid}}\", \"event_type\": \"payment_initiated\", \"transaction_id\": \"{{$guid}}\", \"merchant_id\": \"merchant_2\", \"merchant_name\": \"FreshBasket\", \"amount\": -10, \"currency\": \"INR\", \"timestamp\": \"2026-09-28T10:07:00+00:00\"}\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('2 inserted, 1 rejected', () => { pm.expect(b.inserted).to.eql(2); pm.expect(b.rejected).to.eql(1); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /events — invalid single event (422 envelope)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/events",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"not-a-uuid\",\n  \"event_type\": \"payment_initiated\",\n  \"transaction_id\": \"{{$guid}}\",\n  \"merchant_id\": \"merchant_1\",\n  \"amount\": 100,\n  \"currency\": \"INR\",\n  \"timestamp\": \"2026-09-28T10:00:00+00:00\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 422', () => pm.response.to.have.status(422));",
+                  "pm.test('error envelope shape', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b.error.code).to.eql('VALIDATION_ERROR');",
+                  "  pm.expect(b.error).to.have.property('request_id');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Idempotency proof",
+      "item": [
+        {
+          "name": "Step 1 — ingest event, save id",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/events",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"11111111-2222-3333-4444-555555555555\",\n  \"event_type\": \"payment_initiated\",\n  \"transaction_id\": \"66666666-7777-8888-9999-000000000000\",\n  \"merchant_id\": \"merchant_1\",\n  \"merchant_name\": \"QuickMart\",\n  \"amount\": 999.00,\n  \"currency\": \"INR\",\n  \"timestamp\": \"2026-09-28T09:00:00+00:00\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.test('first post: inserted 1', () => pm.expect(b.inserted).to.eql(1));",
+                  "pm.collectionVariables.set('idem_transaction_id', '66666666-7777-8888-9999-000000000000');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Step 2 — repost identical event",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/events",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"11111111-2222-3333-4444-555555555555\",\n  \"event_type\": \"payment_initiated\",\n  \"transaction_id\": \"66666666-7777-8888-9999-000000000000\",\n  \"merchant_id\": \"merchant_1\",\n  \"merchant_name\": \"QuickMart\",\n  \"amount\": 999.00,\n  \"currency\": \"INR\",\n  \"timestamp\": \"2026-09-28T09:00:00+00:00\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.test('replay: 0 inserted, 1 duplicate', () => {",
+                  "  pm.expect(b.inserted).to.eql(0);",
+                  "  pm.expect(b.duplicates).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Step 3 — fetch transaction, event_count unchanged",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/transactions/{{idem_transaction_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('event_count is 1, not 2', () => {",
+                  "  pm.expect(pm.response.json().transaction.event_count).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. List Transactions",
+      "item": [
+        {
+          "name": "GET /transactions (default)",
+          "request": { "method": "GET", "url": "{{base_url}}/transactions?limit=10" }
+        },
+        {
+          "name": "GET /transactions?merchant_id=&status=",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/transactions?merchant_id=merchant_1&status=settled&limit=10"
+          }
+        },
+        {
+          "name": "GET /transactions — date range + sort",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/transactions?from=2026-02-01&to=2026-03-01&sort_by=payment_amount&sort_order=desc&limit=10"
+          }
+        },
+        {
+          "name": "GET /transactions — page 2",
+          "request": { "method": "GET", "url": "{{base_url}}/transactions?limit=10&offset=10" }
+        },
+        {
+          "name": "GET /transactions?has_discrepancy=true",
+          "request": { "method": "GET", "url": "{{base_url}}/transactions?has_discrepancy=true&limit=10" }
+        }
+      ]
+    },
+    {
+      "name": "4. Transaction Detail",
+      "item": [
+        {
+          "name": "GET /transactions/{id} — found",
+          "request": { "method": "GET", "url": "{{base_url}}/transactions/{{sample_transaction_id}}" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('has events array', () => pm.expect(pm.response.json().events).to.be.an('array'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /transactions/{id} — not found (404 envelope)",
+          "request": { "method": "GET", "url": "{{base_url}}/transactions/00000000-0000-0000-0000-000000000000" },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('error code', () => pm.expect(pm.response.json().error.code).to.eql('TRANSACTION_NOT_FOUND'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Reconciliation Summary",
+      "item": [
+        {
+          "name": "GET /reconciliation/summary?group_by=merchant,date",
+          "request": { "method": "GET", "url": "{{base_url}}/reconciliation/summary?group_by=merchant,date&limit=20" }
+        },
+        {
+          "name": "GET /reconciliation/summary?group_by=merchant,date,status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/reconciliation/summary?group_by=merchant,date,status&limit=20"
+          }
+        },
+        {
+          "name": "GET /reconciliation/summary — one merchant, month granularity",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/reconciliation/summary?group_by=date&granularity=month&merchant_id=merchant_1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Reconciliation Discrepancies",
+      "item": [
+        {
+          "name": "GET /reconciliation/discrepancies (all types)",
+          "request": { "method": "GET", "url": "{{base_url}}/reconciliation/discrepancies?limit=20" }
+        },
+        {
+          "name": "GET /reconciliation/discrepancies?type=AMOUNT_MISMATCH",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/reconciliation/discrepancies?type=AMOUNT_MISMATCH&limit=20"
+          }
+        },
+        {
+          "name": "GET /reconciliation/discrepancies?type=DOUBLE_SETTLEMENT",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/reconciliation/discrepancies?type=DOUBLE_SETTLEMENT&limit=20"
+          }
+        },
+        {
+          "name": "GET /reconciliation/discrepancies — custom grace window",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/reconciliation/discrepancies?type=PROCESSED_NOT_SETTLED&unsettled_after_hours=24"
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Error Handling",
+      "item": [
+        {
+          "name": "GET /transactions — bad sort_by (400)",
+          "request": { "method": "GET", "url": "{{base_url}}/transactions?sort_by=nope" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "exec": ["pm.test('status 400', () => pm.response.to.have.status(400));"] }
+            }
+          ]
+        },
+        {
+          "name": "GET /transactions — limit over cap (400)",
+          "request": { "method": "GET", "url": "{{base_url}}/transactions?limit=99999" },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "exec": ["pm.test('status 400', () => pm.response.to.have.status(400));"] }
+            }
+          ]
+        },
+        {
+          "name": "POST /events — oversized batch (413)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/events",
+            "body": { "mode": "raw", "raw": "{\n  \"events\": []\n}" }
+          }
+        }
+      ]
+    }
+  ]
+}

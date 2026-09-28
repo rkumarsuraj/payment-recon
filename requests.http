@@ -1,0 +1,155 @@
+### Requires the "REST Client" extension (humao.rest-client) in VS Code.
+### Click "Send Request" above any block below to fire it and see the
+### response in a split pane. No Postman, no curl, no leaving the editor.
+
+@base_url = http://localhost:8000
+
+### 0. Health check — run this first
+GET {{base_url}}/health
+
+### 1a. Ingest a single event
+POST {{base_url}}/events
+Content-Type: application/json
+
+{
+  "event_id": "b768e3a7-9eb3-4603-b21c-a54cc95661bc",
+  "event_type": "payment_initiated",
+  "transaction_id": "2f86e94c-239c-4302-9874-75f28e3474ee",
+  "merchant_id": "merchant_2",
+  "merchant_name": "FreshBasket",
+  "amount": 15248.29,
+  "currency": "INR",
+  "timestamp": "2026-01-08T12:11:58.085567+00:00"
+}
+
+### 1b. Replay the exact same event — proves idempotency
+### (run 1a first, then this — expect inserted:0, duplicates:1)
+POST {{base_url}}/events
+Content-Type: application/json
+
+{
+  "event_id": "b768e3a7-9eb3-4603-b21c-a54cc95661bc",
+  "event_type": "payment_initiated",
+  "transaction_id": "2f86e94c-239c-4302-9874-75f28e3474ee",
+  "merchant_id": "merchant_2",
+  "merchant_name": "FreshBasket",
+  "amount": 15248.29,
+  "currency": "INR",
+  "timestamp": "2026-01-08T12:11:58.085567+00:00"
+}
+
+### 1c. Ingest a full lifecycle (3 events, one batch)
+POST {{base_url}}/events
+Content-Type: application/json
+
+{
+  "events": [
+    {
+      "event_id": "aaaaaaaa-0000-0000-0000-000000000001",
+      "event_type": "payment_initiated",
+      "transaction_id": "11111111-0000-0000-0000-000000000001",
+      "merchant_id": "merchant_1",
+      "merchant_name": "QuickMart",
+      "amount": 1500.00,
+      "currency": "INR",
+      "timestamp": "2026-03-01T09:00:00+00:00"
+    },
+    {
+      "event_id": "aaaaaaaa-0000-0000-0000-000000000002",
+      "event_type": "payment_processed",
+      "transaction_id": "11111111-0000-0000-0000-000000000001",
+      "merchant_id": "merchant_1",
+      "merchant_name": "QuickMart",
+      "amount": 1500.00,
+      "currency": "INR",
+      "timestamp": "2026-03-01T09:01:30+00:00"
+    },
+    {
+      "event_id": "aaaaaaaa-0000-0000-0000-000000000003",
+      "event_type": "settled",
+      "transaction_id": "11111111-0000-0000-0000-000000000001",
+      "merchant_id": "merchant_1",
+      "merchant_name": "QuickMart",
+      "amount": 1500.00,
+      "currency": "INR",
+      "timestamp": "2026-03-03T04:15:00+00:00"
+    }
+  ]
+}
+
+### 1d. Batch with one deliberately invalid event — proves partial success
+POST {{base_url}}/events
+Content-Type: application/json
+
+{
+  "events": [
+    {
+      "event_id": "bbbbbbbb-0000-0000-0000-000000000001",
+      "event_type": "payment_initiated",
+      "transaction_id": "22222222-0000-0000-0000-000000000001",
+      "merchant_id": "merchant_3",
+      "merchant_name": "UrbanEats",
+      "amount": 800.00,
+      "currency": "INR",
+      "timestamp": "2026-03-05T10:00:00+00:00"
+    },
+    {
+      "event_id": "bbbbbbbb-0000-0000-0000-000000000002",
+      "event_type": "payment_initiated",
+      "transaction_id": "22222222-0000-0000-0000-000000000002",
+      "merchant_id": "merchant_3",
+      "merchant_name": "UrbanEats",
+      "amount": -50.00,
+      "currency": "INR",
+      "timestamp": "2026-03-05T10:01:00+00:00"
+    }
+  ]
+}
+
+### 2a. List transactions — default
+GET {{base_url}}/transactions?limit=10
+
+### 2b. List transactions — filtered by merchant + status
+GET {{base_url}}/transactions?merchant_id=merchant_1&status=settled&limit=20
+
+### 2c. List transactions — date range + sort by amount
+GET {{base_url}}/transactions?from=2026-02-01&to=2026-03-01&sort_by=payment_amount&sort_order=desc
+
+### 2d. List transactions — only ones with a discrepancy
+GET {{base_url}}/transactions?has_discrepancy=true&limit=50
+
+### 3a. Transaction detail — the one we just ingested above
+GET {{base_url}}/transactions/11111111-0000-0000-0000-000000000001
+
+### 3b. Transaction detail — not found (404 envelope)
+GET {{base_url}}/transactions/00000000-0000-0000-0000-000000000000
+
+### 3c. Transaction detail — malformed id (422, not 404)
+GET {{base_url}}/transactions/not-a-uuid
+
+### 4a. Reconciliation summary — by merchant
+GET {{base_url}}/reconciliation/summary?group_by=merchant
+
+### 4b. Reconciliation summary — by merchant + date + status
+GET {{base_url}}/reconciliation/summary?group_by=merchant,date,status&granularity=day
+
+### 4c. Reconciliation summary — one merchant, monthly buckets
+GET {{base_url}}/reconciliation/summary?group_by=date&granularity=month&merchant_id=merchant_1
+
+### 5a. Discrepancies — everything
+GET {{base_url}}/reconciliation/discrepancies?limit=20
+
+### 5b. Discrepancies — amount mismatches only
+GET {{base_url}}/reconciliation/discrepancies?type=AMOUNT_MISMATCH
+
+### 5c. Discrepancies — double settlements only
+GET {{base_url}}/reconciliation/discrepancies?type=DOUBLE_SETTLEMENT
+
+### 5d. Discrepancies — tighter grace window
+GET {{base_url}}/reconciliation/discrepancies?type=PROCESSED_NOT_SETTLED&unsettled_after_hours=24
+
+### 6. Error handling — bad sort_by (400)
+GET {{base_url}}/transactions?sort_by=nope
+
+### 7. Error handling — limit over cap (400)
+GET {{base_url}}/transactions?limit=99999
